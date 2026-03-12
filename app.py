@@ -8,30 +8,44 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
 
-# 1. INITIALIZATION
+# 1. CLOUD OPTIMIZATION
 load_dotenv()
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress heavy AI logs
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0' # Stability for small RAM
+
 app = Flask(__name__)
-# Secret key for session encryption
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'prod_secret_88')
+# Use environment variable for secret key, fallback only for local
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default_secret_key_for_dev')
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 
-# --- 2. FIREBASE SETUP (With safety check) ---
+# 2. FIREBASE SETUP (Production Hardened)
+db = None
 try:
+    # Render looks for this file in the root directory
+    cred_path = os.path.join(os.getcwd(), 'serviceAccountKey.json')
     if not firebase_admin._apps:
-        cred = credentials.Certificate("serviceAccountKey.json")
-        firebase_admin.initialize_app(cred)
-    db = firestore.client()
+        if os.path.exists(cred_path):
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred)
+            db = firestore.client()
+            print("✅ Firebase Connected: Production Mode")
+        else:
+            print("❌ Error: serviceAccountKey.json not found in root!")
 except Exception as e:
-    print(f"🔥 Firebase Error: {e}. Check if serviceAccountKey.json is missing!")
+    print(f"🔥 Firebase Initialization Failed: {e}")
 
-# --- 3. AI MODEL LOADING ---
+# 3. AI MODEL LOADING
+model = None
 try:
-    model = tf.keras.models.load_model('models/digit_model.h5')
+    model_path = os.path.join(os.getcwd(), 'models', 'digit_model.h5')
+    model = tf.keras.models.load_model(model_path)
+    print("✅ AI Model Loaded Successfully")
 except Exception as e:
-    print(f"🧠 AI Model Error: {e}. Check if 'models/digit_model.h5' exists!")
+    print(f"🧠 AI Model Error: {e}")
 
 # --- 4. LOGIC HELPERS ---
 def get_user_data(email):
+    if not db: return None
     try:
         user_ref = db.collection('users').document(email).get()
         return user_ref.to_dict() if user_ref.exists else None
@@ -42,7 +56,6 @@ def get_user_data(email):
 
 @app.route('/')
 def index():
-    # If already logged in and pro, skip the landing page
     if 'user' in session:
         user = get_user_data(session['user'])
         if user and user.get('is_pro'):
@@ -51,14 +64,13 @@ def index():
 
 @app.route('/auth')
 def auth_page():
-    # Pass API key for Google Login
     return render_template('login.html', firebase_api_key=os.getenv('FIREBASE_API_KEY'))
 
 @app.route('/firebase-login', methods=['POST'])
 def firebase_login():
+    if not db: return jsonify({"status": "error", "message": "Database not initialized"}), 500
     data = request.json
     email, name = data.get('email'), data.get('name')
-    # Sync Google User to Firestore
     db.collection('users').document(email).set({
         'name': name, 
         'email': email, 
@@ -69,8 +81,8 @@ def firebase_login():
 
 @app.route('/manual-login', methods=['POST'])
 def manual_login():
+    if not db: return "Database connection error", 500
     email = request.form.get('email')
-    # Manual login simulation for the demo
     db.collection('users').document(email).set({
         'name': email.split('@')[0], 
         'email': email, 
@@ -83,7 +95,6 @@ def manual_login():
 def check_access():
     if 'user' not in session: return redirect(url_for('auth_page'))
     user = get_user_data(session['user'])
-    # If they paid, go to AI. If not, go to Payment page.
     if user and user.get('is_pro'):
         return redirect(url_for('dashboard'))
     return render_template('support.html')
@@ -97,7 +108,7 @@ def checkout():
             line_items=[{
                 'price_data': {
                     'currency': 'usd', 
-                    'product_data': {'name': 'Pro AI Access'}, 
+                    'product_data': {'name': 'CortexPay Pro Access'}, 
                     'unit_amount': 500
                 }, 
                 'quantity': 1
@@ -112,8 +123,7 @@ def checkout():
 
 @app.route('/payment-success')
 def payment_success():
-    if 'user' in session:
-        # Finalize Pro status in Cloud DB
+    if 'user' in session and db:
         db.collection('users').document(session['user']).set({'is_pro': True}, merge=True)
     return redirect(url_for('dashboard'))
 
@@ -121,7 +131,6 @@ def payment_success():
 def dashboard():
     if 'user' not in session: return redirect(url_for('auth_page'))
     user = get_user_data(session['user'])
-    # Strict Guard: Only Pros allowed here
     if not user or not user.get('is_pro'): 
         return redirect(url_for('check_access'))
     return render_template('dashboard.html', name=user.get('name', 'User'))
@@ -133,20 +142,18 @@ def predict():
     file = request.files['file']
     img = Image.open(file.stream).convert('L').resize((28, 28))
     
-    # Pre-processing
     if np.mean(np.array(img)) > 127: 
         img = ImageOps.invert(img)
     img_array = (np.array(img) / 255.0).reshape(1, 28, 28)
     
-    # AI Thinking
     res = int(np.argmax(model.predict(img_array)))
     
-    # Cloud Logging
-    db.collection('prediction_logs').add({
-        'user': session['user'], 
-        'prediction': res, 
-        'timestamp': firestore.SERVER_TIMESTAMP
-    })
+    if db:
+        db.collection('prediction_logs').add({
+            'user': session['user'], 
+            'prediction': res, 
+            'timestamp': firestore.SERVER_TIMESTAMP
+        })
     return jsonify({'prediction': res})
 
 @app.route('/logout')
@@ -154,6 +161,8 @@ def logout():
     session.clear()
     return redirect(url_for('index'))
 
+# --- 6. DYNAMIC PORT BINDING (The "Fix") ---
 if __name__ == '__main__':
-    # FORCING PORT 5000 
-    app.run(debug=True, port=5000)
+    # Use the port assigned by the cloud provider, default to 5000 for local
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
