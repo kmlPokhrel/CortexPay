@@ -8,49 +8,49 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
 
-# 1. CLOUD OPTIMIZATION
+# 1. PRODUCTION OPTIMIZATION (Do this before anything else)
 load_dotenv()
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress heavy AI logs
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0' # Stability for small RAM
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
+# Limit TensorFlow memory usage for Render's 512MB RAM
+tf.config.threading.set_intra_op_parallelism_threads(1)
+tf.config.threading.set_inter_op_parallelism_threads(1)
 
 app = Flask(__name__)
-# Use environment variable for secret key, fallback only for local
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default_secret_key_for_dev')
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'cortex_secure_prod_99')
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 
-# 2. FIREBASE SETUP (Production Hardened)
+# 2. FIREBASE SETUP
 db = None
 try:
-    # Render looks for this file in the root directory
     cred_path = os.path.join(os.getcwd(), 'serviceAccountKey.json')
     if not firebase_admin._apps:
         if os.path.exists(cred_path):
             cred = credentials.Certificate(cred_path)
             firebase_admin.initialize_app(cred)
             db = firestore.client()
-            print("✅ Firebase Connected: Production Mode")
-        else:
-            print("❌ Error: serviceAccountKey.json not found in root!")
+            print("✅ Firebase Connected")
 except Exception as e:
-    print(f"🔥 Firebase Initialization Failed: {e}")
+    print(f"🔥 Firebase Error: {e}")
 
-# 3. AI MODEL LOADING
+# 3. AI MODEL LOADING (The Version-Proof Way)
 model = None
 try:
     model_path = os.path.join(os.getcwd(), 'models', 'digit_model.h5')
-    model = tf.keras.models.load_model(model_path)
-    print("✅ AI Model Loaded Successfully")
+    # 'compile=False' fixes the 'batch_shape' error caused by TF version differences
+    model = tf.keras.models.load_model(model_path, compile=False)
+    print("✅ AI Model Loaded: Version Patch Applied")
 except Exception as e:
     print(f"🧠 AI Model Error: {e}")
 
-# --- 4. LOGIC HELPERS ---
+# --- 4. HELPERS ---
 def get_user_data(email):
     if not db: return None
     try:
         user_ref = db.collection('users').document(email).get()
         return user_ref.to_dict() if user_ref.exists else None
-    except:
-        return None
+    except: return None
 
 # --- 5. ROUTES ---
 
@@ -68,25 +68,21 @@ def auth_page():
 
 @app.route('/firebase-login', methods=['POST'])
 def firebase_login():
-    if not db: return jsonify({"status": "error", "message": "Database not initialized"}), 500
+    if not db: return jsonify({"status": "error"}), 500
     data = request.json
     email, name = data.get('email'), data.get('name')
     db.collection('users').document(email).set({
-        'name': name, 
-        'email': email, 
-        'last_login': firestore.SERVER_TIMESTAMP
+        'name': name, 'email': email, 'last_login': firestore.SERVER_TIMESTAMP
     }, merge=True)
     session['user'] = email
     return jsonify({"status": "success"})
 
 @app.route('/manual-login', methods=['POST'])
 def manual_login():
-    if not db: return "Database connection error", 500
+    if not db: return "Database Error", 500
     email = request.form.get('email')
     db.collection('users').document(email).set({
-        'name': email.split('@')[0], 
-        'email': email, 
-        'last_login': firestore.SERVER_TIMESTAMP
+        'name': email.split('@')[0], 'email': email, 'last_login': firestore.SERVER_TIMESTAMP
     }, merge=True)
     session['user'] = email
     return redirect(url_for('check_access'))
@@ -95,31 +91,29 @@ def manual_login():
 def check_access():
     if 'user' not in session: return redirect(url_for('auth_page'))
     user = get_user_data(session['user'])
-    if user and user.get('is_pro'):
-        return redirect(url_for('dashboard'))
+    if user and user.get('is_pro'): return redirect(url_for('dashboard'))
     return render_template('support.html')
 
 @app.route('/checkout', methods=['POST'])
 def checkout():
     if 'user' not in session: return redirect(url_for('auth_page'))
     try:
-        session_stripe = stripe.checkout.Session.create(
+        checkout_session = stripe.checkout.Session.create(
             payment_method_types=['card'],
             line_items=[{
                 'price_data': {
-                    'currency': 'usd', 
-                    'product_data': {'name': 'CortexPay Pro Access'}, 
-                    'unit_amount': 500
-                }, 
-                'quantity': 1
+                    'currency': 'usd',
+                    'product_data': {'name': 'CortexPay Pro Access'},
+                    'unit_amount': 500,
+                },
+                'quantity': 1,
             }],
             mode='payment',
             success_url=url_for('payment_success', _external=True),
             cancel_url=url_for('index', _external=True),
         )
-        return redirect(session_stripe.url, code=303)
-    except Exception as e:
-        return f"Stripe Error: {e}"
+        return redirect(checkout_session.url, code=303)
+    except Exception as e: return str(e)
 
 @app.route('/payment-success')
 def payment_success():
@@ -131,38 +125,31 @@ def payment_success():
 def dashboard():
     if 'user' not in session: return redirect(url_for('auth_page'))
     user = get_user_data(session['user'])
-    if not user or not user.get('is_pro'): 
-        return redirect(url_for('check_access'))
+    if not user or not user.get('is_pro'): return redirect(url_for('check_access'))
     return render_template('dashboard.html', name=user.get('name', 'User'))
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    if 'user' not in session: return jsonify({'error': 'Unauthorized'}), 401
-    
+    if 'user' not in session or not model: return jsonify({'error': 'Unauthorized'}), 401
     file = request.files['file']
     img = Image.open(file.stream).convert('L').resize((28, 28))
-    
-    if np.mean(np.array(img)) > 127: 
-        img = ImageOps.invert(img)
+    if np.mean(np.array(img)) > 127: img = ImageOps.invert(img)
     img_array = (np.array(img) / 255.0).reshape(1, 28, 28)
     
-    res = int(np.argmax(model.predict(img_array)))
+    # Inference
+    prediction = int(np.argmax(model.predict(img_array)))
     
     if db:
         db.collection('prediction_logs').add({
-            'user': session['user'], 
-            'prediction': res, 
-            'timestamp': firestore.SERVER_TIMESTAMP
+            'user': session['user'], 'prediction': prediction, 'timestamp': firestore.SERVER_TIMESTAMP
         })
-    return jsonify({'prediction': res})
+    return jsonify({'prediction': prediction})
 
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect(url_for('index'))
 
-# --- 6. DYNAMIC PORT BINDING (The "Fix") ---
 if __name__ == '__main__':
-    # Use the port assigned by the cloud provider, default to 5000 for local
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
