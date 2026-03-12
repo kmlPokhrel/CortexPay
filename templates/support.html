@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Upgrade | Neural Vision</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="d-flex align-items-center vh-100">
+    <div class="container" style="max-width: 500px;">
+        <div class="glass-card text-center p-5 shadow-lg">
+            <div class="mb-4">
+                <span style="font-size: 3rem;">💎</span>
+            </div>
+            <h2 class="fw-bold mb-3">Upgrade to Pro</h2>
+            <p class="text-secondary mb-4">You're logged in! To unlock the full Neural Inference Engine and see the AI analyze your digits, support us with a small one-time payment.</p>
+            
+            <form action="/checkout" method="POST">
+                <button type="submit" class="btn btn-premium btn-lg w-100 py-3 shadow">
+                    Unlock AI Dashboard ($5)
+                </button>
+            </form>
+            
+            <div class="mt-4">
+                <a href="/logout" class="small text-secondary text-decoration-none text-uppercase tracking-widest">Sign out</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

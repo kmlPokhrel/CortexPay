@@ -1,0 +1,8 @@
+flask
+gunicorn
+tensorflow-cpu
+stripe
+python-dotenv
+firebase-admin
+pillow
+numpy
