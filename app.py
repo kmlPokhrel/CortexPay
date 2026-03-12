@@ -8,12 +8,12 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
 
-# 1. PRODUCTION OPTIMIZATION (Do this before anything else)
+# 1. CLOUD OPTIMIZATION (Crucial for 512MB RAM)
 load_dotenv()
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
-# Limit TensorFlow memory usage for Render's 512MB RAM
+# Force single-thread to prevent memory spikes
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
 
@@ -34,15 +34,16 @@ try:
 except Exception as e:
     print(f"🔥 Firebase Error: {e}")
 
-# 3. AI MODEL LOADING (The Version-Proof Way)
+# 3. LAZY AI MODEL LOADING (Prevents startup crash)
 model = None
-try:
-    model_path = os.path.join(os.getcwd(), 'models', 'digit_model.h5')
-    # 'compile=False' fixes the 'batch_shape' error caused by TF version differences
-    model = tf.keras.models.load_model(model_path, compile=False)
-    print("✅ AI Model Loaded: Version Patch Applied")
-except Exception as e:
-    print(f"🧠 AI Model Error: {e}")
+def get_model():
+    global model
+    if model is None:
+        model_path = os.path.join(os.getcwd(), 'models', 'digit_model.h5')
+        # compile=False avoids version mismatch errors and saves memory
+        model = tf.keras.models.load_model(model_path, compile=False)
+        print("✅ AI Model Loaded into Heap")
+    return model
 
 # --- 4. HELPERS ---
 def get_user_data(email):
@@ -130,20 +131,26 @@ def dashboard():
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    if 'user' not in session or not model: return jsonify({'error': 'Unauthorized'}), 401
-    file = request.files['file']
-    img = Image.open(file.stream).convert('L').resize((28, 28))
-    if np.mean(np.array(img)) > 127: img = ImageOps.invert(img)
-    img_array = (np.array(img) / 255.0).reshape(1, 28, 28)
+    if 'user' not in session: return jsonify({'error': 'Unauthorized'}), 401
     
-    # Inference
-    prediction = int(np.argmax(model.predict(img_array)))
-    
-    if db:
-        db.collection('prediction_logs').add({
-            'user': session['user'], 'prediction': prediction, 'timestamp': firestore.SERVER_TIMESTAMP
-        })
-    return jsonify({'prediction': prediction})
+    # Trigger Lazy Load
+    try:
+        current_model = get_model()
+        file = request.files['file']
+        img = Image.open(file.stream).convert('L').resize((28, 28))
+        if np.mean(np.array(img)) > 127: img = ImageOps.invert(img)
+        img_array = (np.array(img) / 255.0).reshape(1, 28, 28)
+        
+        # Inference
+        prediction = int(np.argmax(current_model.predict(img_array)))
+        
+        if db:
+            db.collection('prediction_logs').add({
+                'user': session['user'], 'prediction': prediction, 'timestamp': firestore.SERVER_TIMESTAMP
+            })
+        return jsonify({'prediction': prediction})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/logout')
 def logout():
